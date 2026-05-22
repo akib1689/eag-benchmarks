@@ -1,0 +1,6 @@
+bird:
+  split: mini_dev_sqlite
+  json_file: mini_dev_sqlite.json
+  gold_file: mini_dev_sqlite_gold.sql
+  databases_dir: dev_databases
+  sample_size: 50

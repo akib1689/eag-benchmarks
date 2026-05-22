@@ -157,6 +157,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# Project data (downloaded separately)
+data/
+
+# Run artifacts
+results/*.json
+results/*.csv
+
 # Spyder project settings
 .spyderproject
 .spyproject
