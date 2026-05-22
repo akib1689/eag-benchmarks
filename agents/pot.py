@@ -41,7 +41,10 @@ class POTAgent(AgentABC):
         try:
             schema = get_schema(db_id)
         except FileNotFoundError as e:
-            return {"sql": "", "usage": {}, "latency_ms": 0, "error": str(e)}
+            return {
+                "answer": "", "raw_output": "", "usage": {}, "latency_ms": 0,
+                "error": str(e),
+            }
 
         user_prompt = f"Schema:\n{schema}\n\nQuestion: {question}"
         if evidence:
@@ -52,16 +55,20 @@ class POTAgent(AgentABC):
         try:
             raw = self.llm.generate(SYSTEM_PROMPT, user_prompt)
         except Exception as e:
-            return {"sql": "", "usage": {}, "latency_ms": 0, "error": str(e)}
+            return {
+                "answer": "", "raw_output": "", "usage": {}, "latency_ms": 0,
+                "error": str(e),
+            }
         latency_ms = (time.perf_counter() - start) * 1000
 
         if "FINAL_SQL:" in raw:
-            sql = raw.split("FINAL_SQL:")[-1].strip().split("\n")[0].strip()
+            answer = raw.split("FINAL_SQL:")[-1].strip().split("\n")[0].strip()
         else:
-            sql = extract_sql(raw)
+            answer = extract_sql(raw)
 
         return {
-            "sql": sql,
+            "answer": answer,
+            "raw_output": raw,
             "usage": self.llm.get_usage(),
             "latency_ms": latency_ms,
             "error": None,
