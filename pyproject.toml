@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Benchmark harness for Execution-Augmented Generation (EAG) — pluggable evaluation of structured-data reasoning paradigms against BIRD text-to-SQL."
 license = "Apache-2.0"
 requires-python = ">=3.10"
-# readme = "README.md"
+readme = "README.md"
 
 dependencies = [
     "openai>=1.12.0",
