@@ -13,7 +13,9 @@ from agents.pal import PALAgent  # noqa: E402
 from agents.pot import POTAgent  # noqa: E402
 from agents.react import ReActAgent  # noqa: E402
 from datasets.bird.loader import load_mini_dev  # noqa: E402
-from eval.executor import execution_accuracy  # noqa: E402
+from eval.answer_extractor import extract_answer  # noqa: E402
+from eval.comparators import compare_answers  # noqa: E402
+from eval.gold import get_gold_answer  # noqa: E402
 from eval.metrics import BenchmarkMetrics, Timer  # noqa: E402
 from llm.glm import GLMClient  # noqa: E402
 from llm.groq import GroqClient  # noqa: E402
@@ -96,27 +98,46 @@ def run_benchmark(agent_name: str, model_name: str, samples: int):
             })
             continue
 
-        pred_sql = result["sql"]
-        is_correct = execution_accuracy(pred_sql, gold_sql, db_id)
+        gold = get_gold_answer(gold_sql, db_id)
+        extracted = extract_answer(result.get("answer", result.get("raw_output", "")))
+
+        if gold is None:
+            print(f"GOLD_ERROR (db={db_id})")
+            metrics.errors += 1
+            metrics.total += 1
+            metrics.per_item.append({
+                "db_id": db_id,
+                "question": question,
+                "error": "Gold SQL execution failed",
+                "correct": False,
+            })
+            continue
+
+        is_correct, confidence, tier = compare_answers(extracted["answer"], gold["answer"])
 
         metrics.total += 1
         metrics.total_latency_ms += timer.elapsed_ms
         if is_correct:
             metrics.correct += 1
+        metrics.record_match(tier, confidence, extracted["success"])
         if result.get("usage"):
             usage = result["usage"]
             metrics.prompt_tokens += usage.get("prompt_tokens", 0)
             metrics.completion_tokens += usage.get("completion_tokens", 0)
             metrics.total_tokens += usage.get("total_tokens", 0)
 
-        status = "CORRECT" if is_correct else "WRONG"
+        status = f"{'CORRECT' if is_correct else 'WRONG'} [{tier}]"
         print(f"{status} ({metrics.accuracy:.1%})")
 
         metrics.per_item.append({
             "db_id": db_id,
             "question": question,
-            "predicted_sql": pred_sql,
-            "gold_sql": gold_sql,
+            "agent_answer": extracted["answer"],
+            "gold_answer": gold["answer"],
+            "match_tier": tier,
+            "confidence": round(confidence, 4),
+            "parse_method": extracted["method"],
+            "parse_success": extracted["success"],
             "correct": is_correct,
             "latency_ms": round(timer.elapsed_ms, 2),
             "usage": result.get("usage", {}),
@@ -133,9 +154,12 @@ def main():
     print(f"\n{'='*60}")
     print("  Results")
     print(f"{'='*60}")
-    print(f"  Execution Accuracy: {metrics.accuracy:.4f} ({metrics.correct}/{metrics.total})")
+    print(f"  Answer Accuracy: {metrics.accuracy:.4f} ({metrics.correct}/{metrics.total})")
     print(f"  Avg Latency: {metrics.avg_latency_ms:.2f} ms")
     print(f"  Total Tokens: {metrics.total_tokens}")
+    print(f"  Match Tiers: {metrics.match_tiers}")
+    if metrics.parse_failures:
+        print(f"  Parse Failures: {metrics.parse_failures}")
     if metrics.errors:
         print(f"  Errors: {metrics.errors}")
     print()
