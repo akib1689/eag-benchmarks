@@ -44,7 +44,7 @@ class BenchmarkMetrics:
 
     def summary(self) -> dict:
         return {
-            "execution_accuracy": round(self.accuracy, 4),
+            "answer_accuracy": round(self.accuracy, 4),
             "correct": self.correct,
             "total": self.total,
             "errors": self.errors,
