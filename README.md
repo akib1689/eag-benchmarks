@@ -1,6 +1,6 @@
 # EAG Benchmarks
 
-> Benchmark harness for **Execution-Augmented Generation** — comparing text-to-SQL paradigms against the [BIRD](https://bird-bench.github.io/) dataset.
+> Benchmark harness for **Execution-Augmented Generation** — comparing answer-producing agent paradigms against the [BIRD](https://bird-bench.github.io/) dataset.
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-teal.svg)](https://python.org)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-orange.svg)](LICENSE)
@@ -16,10 +16,12 @@ This harness compares EAG against baseline paradigms on the text-to-SQL task:
 
 | Paradigm | How it works | Status |
 | -------- | ------------ | ------ |
-| **ReAct** | Interleaved reasoning + SQL generation | Working |
-| **PAL** | Program-Aided Language — Python constructs SQL | Stub |
-| **PoT** | Program-of-Thoughts — declarative reasoning → SQL | Stub |
-| **EAG** | Schema-only plan generation + local execution | Stub |
+| **ReAct** | Interleaved reasoning + tool execution → answer | Working (Phase 1) |
+| **PAL** | Program-Aided Language — Python constructs SQL → answer | Transitional |
+| **PoT** | Program-of-Thoughts — declarative reasoning → answer | Transitional |
+| **EAG** | Schema-only plan generation + local execution → answer | Stub |
+
+**Evaluation compares answers, not SQL.** Each agent produces an answer to the natural language question. The evaluator compares it against the gold answer (computed by executing the gold SQL internally) using tiered matching: exact → set equivalence → fuzzy numeric.
 
 ## Quick Start
 
@@ -68,17 +70,24 @@ Results are saved to `results/` as timestamped JSON files.
 ```
 eag-benchmarks/
 ├── agents/           # Agent implementations (each conforms to AgentABC)
-│   ├── base.py       # Abstract base class — run(task) → {sql, usage, latency_ms, error}
-│   ├── react.py      # Full ReAct implementation
-│   ├── pal.py        # PAL stub
-│   ├── pot.py        # PoT stub
+│   ├── base.py       # Abstract base class — run(task) → {answer, raw_output, usage, latency_ms, error}
+│   ├── react.py      # ReAct agent (reasoning + tool execution)
+│   ├── pal.py        # PAL agent (transitional)
+│   ├── pot.py        # PoT agent (transitional)
 │   └── eag.py        # EAG stub (NotImplementedError)
+├── tools/            # Agent tools for environment interaction
+│   ├── __init__.py   # ToolABC base class, @register_tool decorator, registry
+│   └── execute_sql.py # ExecuteSQLTool — sandboxed SQLite execution
+├── eval/             # Answer-based evaluation pipeline
+│   ├── gold.py       # Gold answer generation (executes gold SQL → normalized result)
+│   ├── answer_extractor.py # Parse agent output → structured answer
+│   ├── comparators.py # Three-tier matching: exact → set → fuzzy
+│   ├── normalizer.py # Type coercion, NULL handling, shape detection
+│   ├── metrics.py    # BenchmarkMetrics (match_tiers, parse_failures, avg_confidence)
+│   └── executor.py   # Low-level SQL execution utility
 ├── datasets/
 │   └── bird/
 │       └── loader.py # BIRD Mini-Dev loader — schema-only, no raw data exposure
-├── eval/
-│   ├── executor.py   # Sandboxed SQLite execution + execution_accuracy()
-│   └── metrics.py    # BenchmarkMetrics, Timer
 ├── llm/
 │   ├── provider.py   # LLMInterface (abstract) — swap providers with zero code changes
 │   ├── groq.py       # GroqClient (gpt-oss-120b)
@@ -91,11 +100,25 @@ eag-benchmarks/
 └── results/          # Run artifacts (gitignored)
 ```
 
+### Evaluation Flow
+
+```
+Agent output → extract_answer() → canonical form ─┐
+                                                    ├→ compare_answers() → (correct, confidence, tier)
+Gold SQL → execute → normalize_result() ───────────┘
+```
+
 ### Adding a New Agent
 
 1. Create `agents/your_agent.py` inheriting from `AgentABC`
-2. Implement `run(task)` returning `{sql, usage, latency_ms, error}`
+2. Implement `run(task)` returning `{answer, raw_output, usage, latency_ms, error}`
 3. Register it in `benchmarks/run.py` under `AGENTS`
+
+### Adding a New Tool
+
+1. Create `tools/your_tool.py` inheriting from `ToolABC`
+2. Add `@register_tool` decorator, implement `name`, `description`, `run(params)`
+3. Tools receive `db_id` as a parameter per call — do not store it at construction time
 
 ### Adding a New LLM Provider
 
