@@ -31,11 +31,12 @@ class GLMClient(LLMInterface):
         user_prompt: str,
         temperature: float = 0.1,
         max_tokens: int = 1024,
+        stop: list[str] | None = None,
     ) -> str:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                res = self.client.chat.completions.create(
+                kwargs = dict(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -44,6 +45,9 @@ class GLMClient(LLMInterface):
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                if stop:
+                    kwargs["stop"] = stop
+                res = self.client.chat.completions.create(**kwargs)
                 self._last_usage = {
                     "prompt_tokens": res.usage.prompt_tokens,
                     "completion_tokens": res.usage.completion_tokens,

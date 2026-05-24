@@ -16,6 +16,7 @@ class LLMInterface(ABC):
         user_prompt: str,
         temperature: float = 0.1,
         max_tokens: int = 1024,
+        stop: list[str] | None = None,
     ) -> str:
         """Generate a text completion. Must handle retry logic internally."""
         ...

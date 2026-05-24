@@ -28,7 +28,7 @@ AGENTS = {
 }
 
 MODELS = {
-    "groq": lambda: GroqClient(model="gpt-oss-120b"),
+    "groq": lambda: GroqClient(model="openai/gpt-oss-120b"),
     "glm": lambda: GLMClient(model="glm-5.1"),
 }
 
@@ -61,17 +61,28 @@ def parse_args():
         default=10,
         help="Number of samples from the dev set (default: 10)",
     )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        default=False,
+        help="Print live step-by-step agent execution (Thought/Action/Observation)",
+    )
     return parser.parse_args()
 
 
-def run_benchmark(agent_name: str, model_name: str, samples: int):
+def run_benchmark(agent_name: str, model_name: str, samples: int, trace: bool = False):
     print(f"\n{'='*60}")
     print("  EAG Benchmarks")
     print(f"  Agent: {agent_name} | Model: {model_name} | Samples: {samples}")
+    if trace:
+        print("  Trace: ON")
     print(f"{'='*60}\n")
 
     llm = MODELS[model_name]()
     agent = AGENTS[agent_name](llm)
+
+    if hasattr(agent, "trace"):
+        agent.trace = trace
 
     dataset = load_mini_dev(limit=samples)
     metrics = BenchmarkMetrics()
@@ -81,13 +92,13 @@ def run_benchmark(agent_name: str, model_name: str, samples: int):
         question = item["question"]
         gold_sql = item["SQL"]
 
-        print(f"[{i+1}/{len(dataset)}] {db_id}: {question[:80]}...", end=" ")
+        print(f"[{i+1}/{len(dataset)}] {db_id}: {question[:80]}...")
 
         with Timer() as timer:
             result = agent.run(item)
 
         if result["error"]:
-            print(f"ERROR: {result['error'][:60]}")
+            print(f"  ERROR: {result['error'][:80]}")
             metrics.errors += 1
             metrics.total += 1
             metrics.per_item.append({
@@ -95,14 +106,17 @@ def run_benchmark(agent_name: str, model_name: str, samples: int):
                 "question": question,
                 "error": result["error"],
                 "correct": False,
+                "raw_output": result.get("raw_output", ""),
+                "steps": result.get("steps", []),
             })
+            print()
             continue
 
         gold = get_gold_answer(gold_sql, db_id)
         extracted = extract_answer(result.get("answer", result.get("raw_output", "")))
 
         if gold is None:
-            print(f"GOLD_ERROR (db={db_id})")
+            print(f"  GOLD_ERROR (db={db_id})")
             metrics.errors += 1
             metrics.total += 1
             metrics.per_item.append({
@@ -110,7 +124,10 @@ def run_benchmark(agent_name: str, model_name: str, samples: int):
                 "question": question,
                 "error": "Gold SQL execution failed",
                 "correct": False,
+                "raw_output": result.get("raw_output", ""),
+                "steps": result.get("steps", []),
             })
+            print()
             continue
 
         is_correct, confidence, tier = compare_answers(extracted["answer"], gold["answer"])
@@ -127,7 +144,10 @@ def run_benchmark(agent_name: str, model_name: str, samples: int):
             metrics.total_tokens += usage.get("total_tokens", 0)
 
         status = f"{'CORRECT' if is_correct else 'WRONG'} [{tier}]"
-        print(f"{status} ({metrics.accuracy:.1%})")
+        n_steps = len(result.get("steps", []))
+        print(f"  {status} | Answer: {extracted['answer']} | Gold: {gold['answer']} | "
+              f"Steps: {n_steps} | {metrics.accuracy:.1%}")
+        print()
 
         metrics.per_item.append({
             "db_id": db_id,
@@ -141,6 +161,8 @@ def run_benchmark(agent_name: str, model_name: str, samples: int):
             "correct": is_correct,
             "latency_ms": round(timer.elapsed_ms, 2),
             "usage": result.get("usage", {}),
+            "raw_output": result.get("raw_output", ""),
+            "steps": result.get("steps", []),
         })
 
     return metrics
@@ -149,7 +171,7 @@ def run_benchmark(agent_name: str, model_name: str, samples: int):
 def main():
     args = parse_args()
 
-    metrics = run_benchmark(args.agent, args.model, args.samples)
+    metrics = run_benchmark(args.agent, args.model, args.samples, trace=args.trace)
 
     print(f"\n{'='*60}")
     print("  Results")
