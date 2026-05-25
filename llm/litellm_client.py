@@ -1,10 +1,14 @@
 import os
 from pathlib import Path
+from typing import Type
 
 import litellm
 import yaml
+from pydantic import BaseModel
 
 from .provider import LLMInterface
+
+litellm.enable_json_schema_validation = True
 
 CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
 
@@ -62,7 +66,7 @@ class LiteLLMClient(LLMInterface):
         self.api_base = cfg.get("base_url", os.getenv("LITELLM_BASE_URL", "http://localhost:4000"))
         self.model = f"litellm_proxy/{cfg['model']}"
         self.default_temperature = cfg.get("temperature", 0.0)
-        self.default_max_tokens = cfg.get("max_tokens", 1024)
+        self.default_max_completion_tokens = cfg.get("max_completion_tokens", 4096)
         self.num_retries = cfg.get("num_retries", 8)
         self._last_usage: dict = {}
 
@@ -70,12 +74,13 @@ class LiteLLMClient(LLMInterface):
         self,
         system_prompt: str,
         user_prompt: str,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        stop: list[str] | None = None,
+        max_completion_tokens: int | None = None,
+        response_format: Type[BaseModel] | None = None,
     ) -> str:
-        temperature = temperature if temperature is not None else self.default_temperature
-        max_tokens = max_tokens if max_tokens is not None else self.default_max_tokens
+        max_completion_tokens = (
+            max_completion_tokens if max_completion_tokens is not None
+            else self.default_max_completion_tokens
+        )
 
         kwargs = dict(
             model=self.model,
@@ -83,22 +88,25 @@ class LiteLLMClient(LLMInterface):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=temperature,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
             num_retries=self.num_retries,
             api_key=self.api_key,
             api_base=self.api_base,
         )
-        if stop:
-            kwargs["stop"] = stop
+        if response_format is not None:
+            kwargs["response_format"] = response_format
 
         res = litellm.completion(**kwargs)
+        choice = res.choices[0]
+        msg = choice.message
+        content = msg.content.strip()
         self._last_usage = {
             "prompt_tokens": res.usage.prompt_tokens,
             "completion_tokens": res.usage.completion_tokens,
             "total_tokens": res.usage.total_tokens,
         }
-        return res.choices[0].message.content.strip()
+
+        return content
 
     def get_usage(self) -> dict:
         return self._last_usage.copy()

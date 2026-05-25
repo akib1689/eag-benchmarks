@@ -175,7 +175,7 @@ class ReActAgent(AgentABC):
             try:
                 response = self.llm.generate(
                     system, current_prompt,
-                    max_tokens=4096,
+                    max_completion_tokens=4096,
                     temperature=0.0,
                 )
                 self._accumulate_usage(total_usage)

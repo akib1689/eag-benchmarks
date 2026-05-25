@@ -1,4 +1,7 @@
 from abc import ABC, abstractmethod
+from typing import Type
+
+from pydantic import BaseModel
 
 
 class LLMInterface(ABC):
@@ -14,9 +17,8 @@ class LLMInterface(ABC):
         self,
         system_prompt: str,
         user_prompt: str,
-        temperature: float = 0.1,
-        max_tokens: int = 1024,
-        stop: list[str] | None = None,
+        max_completion_tokens: int = 4096,
+        response_format: Type[BaseModel] | None = None,
     ) -> str:
         """Generate a text completion. Must handle retry logic internally."""
         ...
