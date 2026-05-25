@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from .provider import LLMInterface
 
 litellm.enable_json_schema_validation = True
+# litellm._turn_on_debug()
 
 CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
 

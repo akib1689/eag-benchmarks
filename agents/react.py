@@ -2,7 +2,9 @@ import json
 import re
 import sys
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Literal
+
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from llm.provider import LLMInterface
 from tools.execute_sql import ExecuteSQLTool
@@ -11,7 +13,37 @@ from tools.get_schema import GetSchemaTool
 from .base import AgentABC
 
 MAX_ITERATIONS = 10
-VALID_ACTIONS = {"GetSchema", "Execute", "Finish"}
+
+
+class _ActionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    db_id: str | None = None
+    sql: str | None = None
+    answer: str | float | bool | list | None = None
+
+
+class ReActStep(BaseModel):
+    thought: str = ""
+    action: Literal["GetSchema", "Execute", "Finish"]
+    action_input: _ActionInput
+
+    @model_validator(mode="after")
+    def validate_action_input(self) -> "ReActStep":
+        if self.action == "GetSchema":
+            if not self.action_input.db_id:
+                raise ValueError("GetSchema requires 'db_id'")
+        elif self.action == "Execute":
+            if not self.action_input.sql:
+                raise ValueError("Execute requires 'sql'")
+            if not self.action_input.db_id:
+                raise ValueError("Execute requires 'db_id'")
+        elif self.action == "Finish":
+            if self.action_input.answer is None or self.action_input.answer == "":
+                raise ValueError("Finish requires 'answer'")
+        return self
+
+
+# --- Prompts ---
 
 SYSTEM_PROMPT = """\
 You are a data analyst that answers questions about databases using the ReAct \
@@ -23,15 +55,6 @@ Available tools:
 - GetSchema: Get the enriched database schema with table structures, column \
 descriptions, primary keys, and foreign key relationships.
 - Execute: Execute a SQL query against the database and see the results.
-
-You MUST respond with a single JSON object on every turn. No other text outside \
-the JSON. The JSON schema is:
-
-{
-  "thought": "your reasoning about what to do next",
-  "action": "GetSchema | Execute | Finish",
-  "action_input": { ... }
-}
 
 action_input shapes by action:
 - GetSchema: {"db_id": "<database id>"}
@@ -139,7 +162,8 @@ class ReActAgent(AgentABC):
     execution. The agent explores the schema via GetSchema, writes and
     executes SQL via Execute, and terminates with Finish[answer].
 
-    LLM output is JSON-formatted for robust parsing.
+    LLM output is structured via response_format with a Pydantic model (ReActStep)
+    that enforces valid actions and required action_input fields at parse time.
     """
 
     def __init__(self, llm: LLMInterface, max_steps: int = MAX_ITERATIONS):
@@ -176,7 +200,7 @@ class ReActAgent(AgentABC):
                 response = self.llm.generate(
                     system, current_prompt,
                     max_completion_tokens=4096,
-                    temperature=0.0,
+                    response_format=ReActStep,
                 )
                 self._accumulate_usage(total_usage)
             except Exception as exc:
@@ -209,19 +233,19 @@ class ReActAgent(AgentABC):
 
             full_trace_parts.append(response)
 
-            parsed = self._parse_response(response)
+            step = self._parse_step(response)
             retry_response = None
 
-            if not parsed["valid"]:
+            if step is None:
                 retry_response = self._retry_with_correction(
                     system, current_prompt, response
                 )
                 if retry_response:
                     self._accumulate_usage(total_usage)
                     full_trace_parts.append(retry_response)
-                    parsed = self._parse_response(retry_response)
+                    step = self._parse_step(retry_response)
 
-            if not parsed["valid"]:
+            if step is None:
                 parse_detail = self._diagnose_parse_failure(response)
                 step_record = {
                     "step_type": "parse_error",
@@ -255,9 +279,9 @@ class ReActAgent(AgentABC):
                 iteration += 1
                 continue
 
-            thought = parsed["thought"]
-            action = parsed["action"]
-            action_input = parsed["action_input"]
+            thought = step.thought
+            action = step.action
+            action_input_dict = step.action_input.model_dump(exclude_defaults=True)
 
             if self.trace:
                 _log_trace(f"--- Step {iteration + 1} ---")
@@ -265,23 +289,15 @@ class ReActAgent(AgentABC):
                     _log_trace(f"Thought: {thought}")
 
             if action == "Finish":
-                raw_answer = (
-                    action_input.get("answer", "")
-                    if isinstance(action_input, dict)
-                    else ""
-                )
-                answer = (
-                    str(raw_answer)
-                    if not isinstance(raw_answer, str)
-                    else raw_answer
-                )
+                raw_answer = step.action_input.answer
+                answer = raw_answer
                 if self.trace:
                     _log_trace(f"Finish: {answer}")
                 steps.append({
                     "step_type": "action",
                     "thought": thought,
                     "action": "Finish",
-                    "action_input": action_input,
+                    "action_input": action_input_dict,
                     "observation": None,
                 })
                 latency_ms = (time.perf_counter() - start) * 1000
@@ -294,59 +310,36 @@ class ReActAgent(AgentABC):
                     "steps": steps,
                 }
 
-            if action in ("GetSchema", "Execute"):
-                if self.trace:
-                    _log_trace(f"Action: {action}")
-                    display_input = str(action_input)
-                    if len(display_input) > 120:
-                        display_input = display_input[:120] + "..."
-                    _log_trace(f"Action Input: {display_input}")
+            if self.trace:
+                _log_trace(f"Action: {action}")
+                display_input = str(action_input_dict)
+                if len(display_input) > 120:
+                    display_input = display_input[:120] + "..."
+                _log_trace(f"Action Input: {display_input}")
 
-                observation = self._execute_tool(action, action_input, db_id)
+            observation = self._execute_tool(action, action_input_dict, db_id)
 
-                scratchpad += (
-                    f"\nThought: {thought}\n"
-                    f"Action: {action}\n"
-                    f"Action Input: {json.dumps(action_input)}\n"
-                    f"Observation: {observation}\n"
-                )
-                full_trace_parts.append(f"Observation: {observation}")
+            scratchpad += (
+                f"\nThought: {thought}\n"
+                f"Action: {action}\n"
+                f"Action Input: {json.dumps(action_input_dict)}\n"
+                f"Observation: {observation}\n"
+            )
+            full_trace_parts.append(f"Observation: {observation}")
 
-                if self.trace:
-                    obs_display = observation
-                    if len(obs_display) > 200:
-                        obs_display = obs_display[:200] + "..."
-                    _log_trace(f"Observation: {obs_display}")
+            if self.trace:
+                obs_display = observation
+                if len(obs_display) > 200:
+                    obs_display = obs_display[:200] + "..."
+                _log_trace(f"Observation: {obs_display}")
 
-                steps.append({
-                    "step_type": "action",
-                    "thought": thought,
-                    "action": action,
-                    "action_input": action_input,
-                    "observation": observation,
-                })
-            else:
-                correction_obs = (
-                    f"Error: Unknown action '{action}'. "
-                    f"Available actions: GetSchema, Execute, Finish."
-                )
-                if self.trace:
-                    _log_trace(f"Action: {action} (INVALID)")
-                    _log_trace(f"Observation: {correction_obs}")
-                scratchpad += (
-                    f"\nThought: {thought}\n"
-                    f"Action: {action}\n"
-                    f"Action Input: {json.dumps(action_input)}\n"
-                    f"Observation: {correction_obs}\n"
-                )
-                full_trace_parts.append(f"Observation: {correction_obs}")
-                steps.append({
-                    "step_type": "action",
-                    "thought": thought,
-                    "action": action,
-                    "action_input": action_input,
-                    "observation": correction_obs,
-                })
+            steps.append({
+                "step_type": "action",
+                "thought": thought,
+                "action": action,
+                "action_input": action_input_dict,
+                "observation": observation,
+            })
 
             if self.trace:
                 sys.stdout.flush()
@@ -370,90 +363,45 @@ class ReActAgent(AgentABC):
         parts.append("\nStart by calling GetSchema to explore the database structure.")
         return "\n".join(parts)
 
-    def _parse_response(self, response: str) -> Dict[str, Any]:
-        cleaned = re.sub(r"```(?:json)?\s*", "", response).strip()
-
+    def _parse_step(self, response: str) -> ReActStep | None:
         try:
-            obj = json.loads(cleaned)
-            if isinstance(obj, dict):
-                return self._validate_parsed_object(obj)
-        except (json.JSONDecodeError, ValueError):
+            return ReActStep.model_validate_json(response)
+        except (ValidationError, json.JSONDecodeError):
+            pass
+
+        cleaned = re.sub(r"```(?:json)?\s*", "", response).strip()
+        try:
+            return ReActStep.model_validate_json(cleaned)
+        except (ValidationError, json.JSONDecodeError):
             pass
 
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not match:
-            return {"valid": False}
-
-        try:
-            obj = json.loads(match.group())
-        except (json.JSONDecodeError, ValueError):
-            return {"valid": False}
-
-        if not isinstance(obj, dict):
-            return {"valid": False}
-
-        return self._validate_parsed_object(obj)
-
-    def _validate_parsed_object(self, obj: Dict[str, Any]) -> Dict[str, Any]:
-        thought = obj.get("thought", "")
-        action = obj.get("action")
-
-        if not action or action not in VALID_ACTIONS:
-            return {"valid": False}
-
-        action_input = obj.get("action_input", {})
-        if isinstance(action_input, str):
+        if match:
             try:
-                action_input = json.loads(action_input)
-            except (json.JSONDecodeError, ValueError):
-                action_input = {}
+                return ReActStep.model_validate_json(match.group())
+            except (ValidationError, json.JSONDecodeError):
+                pass
 
-        if not isinstance(action_input, dict):
-            action_input = {"value": action_input}
-
-        return {
-            "valid": True,
-            "thought": thought,
-            "action": action,
-            "action_input": action_input,
-        }
+        return None
 
     def _diagnose_parse_failure(self, response: str) -> Dict[str, Any]:
-        cleaned = re.sub(r"```(?:json)?\s*", "", response).strip()
         diagnosis: Dict[str, Any] = {
             "response_length": len(response),
-            "cleaned_length": len(cleaned),
-            "starts_with_brace": cleaned.startswith("{"),
-            "ends_with_brace": cleaned.endswith("}"),
-            "has_json_object": bool(re.search(r"\{.*\}", cleaned, re.DOTALL)),
             "has_markdown_fences": "```" in response,
         }
-
+        cleaned = re.sub(r"```(?:json)?\s*", "", response).strip()
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if match:
             candidate = match.group()
             diagnosis["candidate_length"] = len(candidate)
             try:
-                obj = json.loads(candidate)
-                diagnosis["json_parse_ok"] = True
-                diagnosis["parsed_keys"] = (
-                    list(obj.keys())
-                    if isinstance(obj, dict)
-                    else type(obj).__name__
-                )
-                if isinstance(obj, dict):
-                    action = obj.get("action")
-                    diagnosis["action_value"] = action
-                    diagnosis["action_valid"] = action in VALID_ACTIONS if action else False
-                    diagnosis["has_action_input"] = "action_input" in obj
-                    diagnosis["has_thought"] = "thought" in obj
-            except (json.JSONDecodeError, ValueError) as e:
-                diagnosis["json_parse_ok"] = False
+                ReActStep.model_validate_json(candidate)
+            except ValidationError as e:
+                diagnosis["validation_errors"] = e.errors()
+            except json.JSONDecodeError as e:
                 diagnosis["json_error"] = str(e)
-                diagnosis["json_error_pos"] = getattr(e, "pos", None)
         else:
-            diagnosis["has_json_object"] = False
-
+            diagnosis["no_json_object_found"] = True
         return diagnosis
 
     def _retry_with_correction(
@@ -467,8 +415,7 @@ class ReActAgent(AgentABC):
         try:
             return self.llm.generate(
                 system, retry_prompt,
-                max_tokens=4096,
-                temperature=0.0,
+                response_format=ReActStep,
             )
         except Exception:
             return None
@@ -476,7 +423,7 @@ class ReActAgent(AgentABC):
     def _execute_tool(
         self, action: str, action_input: Dict[str, Any], db_id: str
     ) -> str:
-        params = dict(action_input) if isinstance(action_input, dict) else {}
+        params = dict(action_input)
         params.setdefault("db_id", db_id)
 
         if action == "GetSchema":

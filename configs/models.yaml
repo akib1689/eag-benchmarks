@@ -12,10 +12,10 @@ groq:
   model: groq/openai/gpt-oss-120b
   api_key_env: LITELLM_API_KEY
   temperature: 0.0
-  max_completion_tokens: 8192
+  max_completion_tokens: 1024
 
 glm:
   model: glm-5.1
   api_key_env: LITELLM_API_KEY
   temperature: 0.0
-  max_completion_tokens: 4096
+  max_completion_tokens: 512
