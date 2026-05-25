@@ -172,10 +172,28 @@ class ReActAgent(AgentABC):
         while iteration < self.max_steps:
             current_prompt = user + scratchpad
 
-            response = self._generate_with_retry(
-                system, current_prompt, total_usage, max_retries=6
-            )
-            if response is None:
+            try:
+                response = self.llm.generate(
+                    system, current_prompt,
+                    max_tokens=2048,
+                    temperature=0.0,
+                )
+                self._accumulate_usage(total_usage)
+            except Exception as exc:
+                full_trace = (
+                    "\n".join(full_trace_parts) if full_trace_parts else scratchpad
+                )
+                latency_ms = (time.perf_counter() - start) * 1000
+                return {
+                    "answer": "",
+                    "raw_output": full_trace,
+                    "usage": total_usage,
+                    "latency_ms": latency_ms,
+                    "error": f"LLM generation failed: {exc}",
+                    "steps": steps,
+                }
+
+            if not response or not response.strip():
                 full_trace = (
                     "\n".join(full_trace_parts) if full_trace_parts else scratchpad
                 )
@@ -351,27 +369,6 @@ class ReActAgent(AgentABC):
             parts.append(f"SQL Hint: {evidence}")
         parts.append("\nStart by calling GetSchema to explore the database structure.")
         return "\n".join(parts)
-
-    def _generate_with_retry(
-        self,
-        system: str,
-        prompt: str,
-        total_usage: Dict[str, int],
-        max_retries: int = 6,
-    ) -> str | None:
-        for _ in range(max_retries + 1):
-            try:
-                response = self.llm.generate(
-                    system, prompt,
-                    max_tokens=2048,
-                    temperature=0.0,
-                )
-                self._accumulate_usage(total_usage)
-                if response and response.strip():
-                    return response
-            except Exception:
-                continue
-        return None
 
     def _parse_response(self, response: str) -> Dict[str, Any]:
         cleaned = re.sub(r"```(?:json)?\s*", "", response).strip()

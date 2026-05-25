@@ -1,7 +1,7 @@
 import os
 import time
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from .provider import LLMInterface
 
@@ -33,6 +33,8 @@ class GroqClient(LLMInterface):
         stop: list[str] | None = None,
     ) -> str:
         max_retries = 3
+        rate_limit_retries = 6
+        rate_limit_attempt = 0
         for attempt in range(max_retries):
             try:
                 kwargs = dict(
@@ -53,6 +55,12 @@ class GroqClient(LLMInterface):
                     "total_tokens": res.usage.total_tokens,
                 }
                 return res.choices[0].message.content.strip()
+            except RateLimitError:
+                if rate_limit_attempt >= rate_limit_retries - 1:
+                    raise
+                wait = min(30, 5 * 2**rate_limit_attempt)
+                time.sleep(wait)
+                rate_limit_attempt += 1
             except Exception:
                 if attempt == max_retries - 1:
                     raise

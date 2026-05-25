@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -67,10 +68,18 @@ def parse_args():
         default=False,
         help="Print live step-by-step agent execution (Thought/Action/Observation)",
     )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=2.0,
+        help="Seconds to wait between questions (default: 2.0)",
+    )
     return parser.parse_args()
 
 
-def run_benchmark(agent_name: str, model_name: str, samples: int, trace: bool = False):
+def run_benchmark(
+    agent_name: str, model_name: str, samples: int, trace: bool = False, delay: float = 2.0
+):
     print(f"\n{'='*60}")
     print("  EAG Benchmarks")
     print(f"  Agent: {agent_name} | Model: {model_name} | Samples: {samples}")
@@ -110,6 +119,8 @@ def run_benchmark(agent_name: str, model_name: str, samples: int, trace: bool = 
                 "steps": result.get("steps", []),
             })
             print()
+            if i < len(dataset) - 1:
+                time.sleep(delay)
             continue
 
         gold = get_gold_answer(gold_sql, db_id)
@@ -128,6 +139,8 @@ def run_benchmark(agent_name: str, model_name: str, samples: int, trace: bool = 
                 "steps": result.get("steps", []),
             })
             print()
+            if i < len(dataset) - 1:
+                time.sleep(delay)
             continue
 
         is_correct, confidence, tier = compare_answers(extracted["answer"], gold["answer"])
@@ -165,13 +178,18 @@ def run_benchmark(agent_name: str, model_name: str, samples: int, trace: bool = 
             "steps": result.get("steps", []),
         })
 
+        if i < len(dataset) - 1:
+            time.sleep(delay)
+
     return metrics
 
 
 def main():
     args = parse_args()
 
-    metrics = run_benchmark(args.agent, args.model, args.samples, trace=args.trace)
+    metrics = run_benchmark(
+        args.agent, args.model, args.samples, trace=args.trace, delay=args.delay,
+    )
 
     print(f"\n{'='*60}")
     print("  Results")
