@@ -20,8 +20,8 @@ CLI flags: `--agent {react,pal,pot,eag}` `--model {groq,glm}` `--dataset {bird}`
 ## Setup before running
 
 1. `cp .env.example .env` and set API keys:
-   - `GROQ_API_KEY` — required for `--model groq`
-   - `GLM_API_KEY` — required for `--model glm` (optional `GLM_BASE_URL` override)
+   - `LITELLM_API_KEY` — virtual key for your LiteLLM proxy (required for all models)
+   - `LITELLM_BASE_URL` — proxy URL (defaults to `http://localhost:4000`)
 2. Download BIRD data: `bash scripts/download_bird.sh` — extracts into `data/bird/` (gitignored)
 
 ## Architecture
@@ -68,12 +68,15 @@ To add a new tool: create `tools/<name>.py`, inherit `ToolABC`, implement `name`
 ### LLM layer
 
 ```
-llm/provider.py    → LLMInterface (abstract) — generate(), get_usage()
-llm/groq.py        → GroqClient (OpenAI-compatible, gpt-oss-120b)
-llm/glm.py         → GLMClient (OpenAI-compatible, glm-5.1)
+llm/provider.py        → LLMInterface (abstract) — generate(), get_usage()
+llm/litellm_client.py  → LiteLLMClient — unified adapter, reads configs/models.yaml
+configs/models.yaml    → Per-model config (model alias, temperature, max_tokens, etc.)
 ```
 
-Both clients use the `openai` library with different `base_url` and include 3-retry exponential backoff.
+All models are accessed through a single `LiteLLMClient` class using the litellm SDK with the
+`litellm_proxy/` prefix. The client reads model configuration from `configs/models.yaml` by name.
+A locally-running LiteLLM proxy handles provider routing, key rotation across multiple accounts,
+and rate-limit retries. The benchmark harness only needs a virtual key + proxy URL.
 
 ### Other modules
 
@@ -87,7 +90,7 @@ configs/datasets.yaml   → Dataset split and path config
 ### Extending
 
 - **New agent**: Create `agents/<name>.py` inheriting `AgentABC`, implement `run()` returning `{answer, raw_output, ...}` + `name`, register in `benchmarks/run.py` under `AGENTS`.
-- **New LLM provider**: Create `llm/<name>.py` inheriting `LLMInterface`, implement `generate()` + `get_usage()`, register in `benchmarks/run.py` under `MODELS`.
+- **New LLM provider**: Add an entry to `configs/models.yaml`, then add a lambda in `benchmarks/run.py` under `MODELS` mapping to `LiteLLMClient(config_name="...")`.
 - **New tool**: Create `tools/<name>.py`, inherit `ToolABC`, add `@register_tool`, implement `run(params)`.
 
 ## Key conventions
@@ -107,6 +110,6 @@ configs/datasets.yaml   → Dataset split and path config
 - `data/` is gitignored — never commit datasets
 - The `eag` agent will raise `NotImplementedError` — do not use `--agent eag`
 - `load_dotenv()` must run before any LLM client instantiation (they read env vars at init)
-- Using `--model glm` without `GLM_API_KEY` set will raise `ValueError` at client init
+- Using `--model groq` or `--model glm` without `LITELLM_API_KEY` set will raise `ValueError` at client init
 - `ExecuteSQLTool` returns full result tables (up to 50 rows displayed + total count). Large result sets are truncated in display but the full row count is included.
 - Answer extractor tries strategies in order: `Finish[answer]` → JSON → numeric scalar → last-line → fallback. The `Finish[answer]` pattern is the intended ReAct output format.

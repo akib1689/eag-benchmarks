@@ -18,8 +18,7 @@ from eval.answer_extractor import extract_answer  # noqa: E402
 from eval.comparators import compare_answers  # noqa: E402
 from eval.gold import get_gold_answer  # noqa: E402
 from eval.metrics import BenchmarkMetrics, Timer  # noqa: E402
-from llm.glm import GLMClient  # noqa: E402
-from llm.groq import GroqClient  # noqa: E402
+from llm.litellm_client import LiteLLMClient  # noqa: E402
 
 AGENTS = {
     "react": lambda llm: ReActAgent(llm),
@@ -29,8 +28,8 @@ AGENTS = {
 }
 
 MODELS = {
-    "groq": lambda: GroqClient(model="openai/gpt-oss-120b"),
-    "glm": lambda: GLMClient(model="glm-5.1"),
+    "groq": lambda: LiteLLMClient(config_name="groq"),
+    "glm": lambda: LiteLLMClient(config_name="glm"),
 }
 
 
