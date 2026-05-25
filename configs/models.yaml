@@ -2,12 +2,12 @@ primary:
   provider: groq
   model: gpt-oss-120b
   base_url: https://api.groq.com/openai/v1
-  temperature: 0.1
+  temperature: 0.0
   max_tokens: 1024
 
 fallback:
   provider: glm
   model: glm-5.1
   base_url: https://open.bigmodel.cn/api/paas/v4
-  temperature: 0.1
+  temperature: 0.0
   max_tokens: 1024

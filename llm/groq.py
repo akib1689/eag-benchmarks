@@ -28,7 +28,7 @@ class GroqClient(LLMInterface):
         self,
         system_prompt: str,
         user_prompt: str,
-        temperature: float = 0.1,
+        temperature: float = 0.0,
         max_tokens: int = 1024,
         stop: list[str] | None = None,
     ) -> str:

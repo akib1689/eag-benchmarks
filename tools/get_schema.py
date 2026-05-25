@@ -1,8 +1,9 @@
 import csv
 import json
+import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from . import ToolABC, register_tool
 
@@ -51,7 +52,7 @@ class GetSchemaTool(ToolABC):
         if not raw_schema and not tables_meta:
             return f"Error: No schema found for database '{db_id}'."
 
-        return self._format_enriched(db_id, raw_schema, tables_meta, descriptions)
+        return self._format_enriched(db_id, raw_schema, tables_meta, descriptions, db_path)
 
     def _format_enriched(
         self,
@@ -59,7 +60,16 @@ class GetSchemaTool(ToolABC):
         raw_schema: Dict[str, str],
         tables_meta: Optional[Dict],
         descriptions: Dict[str, Dict[str, Dict[str, str]]],
+        db_path: Optional[Path] = None,
     ) -> str:
+        conn: Optional[sqlite3.Connection] = None
+        if db_path and db_path.exists():
+            try:
+                conn = sqlite3.connect(str(db_path))
+                conn.execute("PRAGMA query_only = 1")
+            except Exception:
+                conn = None
+
         if tables_meta:
             table_names = tables_meta.get("table_names_original", [])
             col_names_orig = tables_meta.get("column_names_original", [])
@@ -140,11 +150,23 @@ class GetSchemaTool(ToolABC):
                     line += f' "{human}"'
                 if col_desc:
                     line += f" — {col_desc}"
+                format_shown = False
                 if data_fmt and data_fmt.lower() not in (ctype, "text", ""):
                     line += f" (format: {data_fmt})"
+                    format_shown = True
                 if val_desc:
                     val_clean = val_desc.replace("\n", " ").strip()
                     line += f" | {val_clean}"
+
+                if conn and ctype == "text":
+                    distinct = self._get_distinct_values(conn, tname, cname)
+                    if distinct is not None and len(distinct) <= 20:
+                        line += f" {{{', '.join(distinct)}}}"
+
+                if conn and not format_shown and self._is_date_column(cname, ctype):
+                    date_info = self._detect_date_format(conn, tname, cname)
+                    if date_info:
+                        line += f" [format: {date_info['pattern']}]"
 
                 parts.append(line)
 
@@ -153,7 +175,18 @@ class GetSchemaTool(ToolABC):
                 if "references" in raw.lower() or "foreign" in raw.lower():
                     parts.append(f"  [DDL: {raw.strip()}]")
 
+            if conn:
+                row_count = self._get_row_count(conn, tname)
+                if row_count is not None:
+                    parts.append(f"  [{row_count} rows]")
+
             parts.append("")
+
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
         return "\n".join(parts)
 
@@ -226,4 +259,63 @@ class GetSchemaTool(ToolABC):
         for path in candidates:
             if path.exists():
                 return path
+        return None
+
+    @staticmethod
+    def _is_date_column(cname: str, ctype: str) -> bool:
+        if ctype == "date":
+            return True
+        if ctype == "text" and "date" in cname.lower():
+            return True
+        return False
+
+    def _get_row_count(self, conn: sqlite3.Connection, table: str) -> Optional[int]:
+        try:
+            cursor = conn.execute(f'SELECT COUNT(*) FROM "{table}"')
+            return cursor.fetchone()[0]
+        except Exception:
+            return None
+
+    def _get_distinct_values(
+        self, conn: sqlite3.Connection, table: str, column: str, limit: int = 21
+    ) -> Optional[List[str]]:
+        try:
+            cursor = conn.execute(
+                f'SELECT DISTINCT "{column}" FROM "{table}" '
+                f'WHERE "{column}" IS NOT NULL LIMIT {limit}'
+            )
+            return [str(r[0]) for r in cursor.fetchall()]
+        except Exception:
+            return None
+
+    def _detect_date_format(
+        self, conn: sqlite3.Connection, table: str, column: str
+    ) -> Optional[Dict[str, str]]:
+        try:
+            cursor = conn.execute(
+                f'SELECT DISTINCT "{column}" FROM "{table}" '
+                f'WHERE "{column}" IS NOT NULL LIMIT 5'
+            )
+            samples = [str(r[0]) for r in cursor.fetchall()]
+            if not samples:
+                return None
+            pattern = self._infer_date_pattern(samples[0])
+            if pattern:
+                return {"sample": samples[0], "pattern": pattern}
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _infer_date_pattern(value: str) -> Optional[str]:
+        if re.match(r"^\d{6}$", value):
+            month = int(value[4:6])
+            if 1 <= month <= 12:
+                return "YYYYMM"
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+            return "YYYY-MM-DD"
+        if re.match(r"^\d{4}/\d{2}/\d{2}$", value):
+            return "YYYY/MM/DD"
+        if re.match(r"^\d{2}/\d{2}/\d{4}$", value):
+            return "MM/DD/YYYY or DD/MM/YYYY"
         return None
