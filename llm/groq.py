@@ -33,9 +33,10 @@ class GroqClient(LLMInterface):
         stop: list[str] | None = None,
     ) -> str:
         max_retries = 3
-        rate_limit_retries = 6
+        rate_limit_retries = 8
         rate_limit_attempt = 0
-        for attempt in range(max_retries):
+        other_attempt = 0
+        while True:
             try:
                 kwargs = dict(
                     model=self.model,
@@ -56,16 +57,17 @@ class GroqClient(LLMInterface):
                 }
                 return res.choices[0].message.content.strip()
             except RateLimitError:
-                if rate_limit_attempt >= rate_limit_retries - 1:
+                if rate_limit_attempt >= rate_limit_retries:
                     raise
-                wait = min(30, 5 * 2**rate_limit_attempt)
+                wait = min(60, 5 * 2**rate_limit_attempt)
                 time.sleep(wait)
                 rate_limit_attempt += 1
             except Exception:
-                if attempt == max_retries - 1:
+                if other_attempt >= max_retries - 1:
                     raise
-                wait = 2**attempt
+                wait = 2**other_attempt
                 time.sleep(wait)
+                other_attempt += 1
 
     def get_usage(self) -> dict:
         return self._last_usage.copy()
