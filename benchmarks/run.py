@@ -28,7 +28,6 @@ AGENTS = {
 
 MODELS = {
     "groq": lambda: LiteLLMClient(config_name="groq"),
-    "glm": lambda: LiteLLMClient(config_name="glm"),
     "openrouter": lambda: LiteLLMClient(config_name="openrouter"),
 }
 
