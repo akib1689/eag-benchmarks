@@ -164,6 +164,7 @@ data/
 # Run artifacts
 results/*.json
 results/*.csv
+!results/bird_react_openrouter_20260526_163502.json
 
 # Spyder project settings
 .spyderproject
