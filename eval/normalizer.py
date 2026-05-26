@@ -16,7 +16,14 @@ def normalize_value(val: Any) -> Optional[Union[int, float, str]]:
     - int-valued floats -> int (3.0 -> 3)
     - Numeric strings -> int or float
     - Strings -> stripped, lowercased
+    - Lists/tuples -> tuple of normalized elements
+    - Dicts -> string representation
     """
+    if isinstance(val, (dict, list, tuple)):
+        if isinstance(val, dict):
+            return str(val)
+        return tuple(normalize_value(v) for v in val)
+
     if val in NULL_VALUES:
         return None
 

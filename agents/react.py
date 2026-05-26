@@ -1,10 +1,7 @@
 import json
-import re
 import sys
 import time
-from typing import Any, Dict, Literal
-
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from typing import Any
 
 from llm.provider import LLMInterface
 from tools.execute_sql import ExecuteSQLTool
@@ -14,139 +11,127 @@ from .base import AgentABC
 
 MAX_ITERATIONS = 10
 
-
-class _ActionInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    db_id: str | None = None
-    sql: str | None = None
-    answer: str | float | bool | list | None = None
-
-
-class ReActStep(BaseModel):
-    thought: str = ""
-    action: Literal["GetSchema", "Execute", "Finish"]
-    action_input: _ActionInput
-
-    @model_validator(mode="after")
-    def validate_action_input(self) -> "ReActStep":
-        if self.action == "GetSchema":
-            if not self.action_input.db_id:
-                raise ValueError("GetSchema requires 'db_id'")
-        elif self.action == "Execute":
-            if not self.action_input.sql:
-                raise ValueError("Execute requires 'sql'")
-            if not self.action_input.db_id:
-                raise ValueError("Execute requires 'db_id'")
-        elif self.action == "Finish":
-            if self.action_input.answer is None or self.action_input.answer == "":
-                raise ValueError("Finish requires 'answer'")
-        return self
-
-
-# --- Prompts ---
-
 SYSTEM_PROMPT = """\
-You are a data analyst that answers questions about databases using the ReAct \
-(Reasoning + Acting) paradigm. You MUST use tools to explore the database and \
-execute queries. NEVER guess or fabricate answers — every answer must come from \
-query results.
+You are a data analyst that answers questions about databases. You MUST use the \
+provided tools to explore the database and execute queries. NEVER guess or \
+fabricate answers — every answer must come from query results.
 
-Available tools:
-- GetSchema: Get the enriched database schema with table structures, column \
-descriptions, primary keys, and foreign key relationships.
-- Execute: Execute a SQL query against the database and see the results.
+You have two ways to submit your final answer:
+1. Call the "finish" tool with your answer.
+2. Respond with just the answer value (no tool calls).
 
-action_input shapes by action:
-- GetSchema: {"db_id": "<database id>"}
-- Execute:   {"sql": "<SQL query>", "db_id": "<database id>"}
-- Finish:    {"answer": <the final answer as a plain value>}
+## Rules
 
-Rules:
-- You MUST call GetSchema first to understand the database structure.
-- You MUST execute at least one SQL query via Execute before answering.
-- Do NOT guess or fabricate answer values. Every answer must be grounded in \
-query results you have observed.
-- Write only valid SQLite syntax.
-- The final answer must be the actual answer value, NOT a SQL query.
-- For numeric answers, use a number (not a string).
-- For Yes/No questions, use "Yes" or "No".
-- For list answers, use a JSON array.
-- Pay close attention to column descriptions, value descriptions, and foreign \
-key relationships in the schema — they tell you what each column means.
+### Workflow
+- You MUST call get_schema first to understand the database structure.
+- You MUST execute at least one SQL query via execute_sql before answering.
 - When a SQL Hint is provided, use it to construct your query.
 - If a query returns an error, fix the SQL and try again.
+- Write only valid SQLite syntax.
+
+### SQL does the math
+- Always write SQL that produces the FINAL computed answer directly.
+- NEVER compute arithmetic from query results in your head. Have SQL do it.
+- If you need a ratio, write: SELECT a * 1.0 / b — not two separate columns.
+- If you need a difference, write: SELECT x - y — not two queries.
+- If you need a percentage, write: SELECT (x - y) * 100.0 / y — not raw values.
+- NEVER output unevaluated expressions like 2002/30459. SQL must compute the \
+final number.
+
+### Answer format
+- The final answer must be the actual value the question asks for, NOT a SQL \
+query and NOT a JSON object wrapping the answer.
+- Return ONLY the specific value:
+  - "Which year?" → just the year number (e.g., 2013, not {"year": 2013})
+  - "Who?" → just the ID (e.g., 47273, not {"CustomerID": 47273, ...})
+  - "How much?" → just the number (e.g., 1224.96)
+  - "How many?" → just the count (e.g., 176)
+  - "Which month?" → just the month number (e.g., 4 or "04")
+  - "Yes/No" → "Yes" or "No"
+- Do NOT wrap the answer in a JSON object or return extra columns from the \
+result set alongside the answer.
+- Do NOT return the full result row when the question asks for a single value.
+
+### Complex multi-part questions
+- Compute ALL parts in a single SQL query when possible.
+- Return results as a JSON array in the order the question specifies.
+- For percentages, differences, or comparisons between groups, compute them in \
+SQL using CASE/IIF expressions or CTEs — never manually.
+
+### Database awareness
+- Pay close attention to column descriptions, value descriptions, and foreign \
+key relationships in the schema — they tell you what each column means.
 - For questions about totals or aggregates, use GROUP BY with SUM, AVG, COUNT \
 etc. — do not query individual rows.
+- For date columns stored as text (e.g., YYYYMM format), use SUBSTR or BETWEEN \
+to filter by year or month.
 """
 
-FEW_SHOT_1 = """\
-Example 1 (simple lookup):
-
-Database ID: company_db
-Question: How many employees are in the Engineering department?
-SQL Hint: department contains the department name of each employee
-
-{"thought": "I need to see the database schema first.", "action": "GetSchema", \
-"action_input": {"db_id": "company_db"}}
-Observation: Database: company_db
-
-Table: employee
-  id (integer) [PK] — employee identifier
-  name (text) — employee name
-  department (text) — department name
-  salary (real) — annual salary in USD
-
-{"thought": "I can count employees in the Engineering department.", "action": \
-"Execute", "action_input": {"sql": "SELECT COUNT(*) FROM employee WHERE \
-department = 'Engineering'", "db_id": "company_db"}}
-Observation: COUNT(*)
------------
-200
-
-Total rows: 1
-
-{"thought": "I now know the final answer.", "action": "Finish", \
-"action_input": {"answer": 200}}
-"""
-
-FEW_SHOT_2 = """\
-Example 2 (aggregation with GROUP BY):
-
-Database ID: company_db
-Question: Which department has the highest total salary?
-SQL Hint: none
-
-{"thought": "I need the schema first.", "action": "GetSchema", \
-"action_input": {"db_id": "company_db"}}
-Observation: Database: company_db
-
-Table: employee
-  id (integer) [PK] — employee identifier
-  name (text) — employee name
-  department (text) — department name
-  salary (real) — annual salary in USD
-
-{"thought": "I need to sum salaries per department and find the max.", \
-"action": "Execute", "action_input": {"sql": "SELECT department, SUM(salary) \
-as total FROM employee GROUP BY department ORDER BY total DESC LIMIT 1", \
-"db_id": "company_db"}}
-Observation: department  total
------------- -----------
-Engineering   15000000
-
-Total rows: 1
-
-{"thought": "I now know the final answer.", "action": "Finish", \
-"action_input": {"answer": "Engineering"}}
-"""
-
-CORRECTION_PROMPT = (
-    "Your previous response was not valid JSON or did not match the required "
-    "schema. You MUST respond with a single JSON object:\n"
-    '{"thought": "...", "action": "GetSchema|Execute|Finish", '
-    '"action_input": { ... }}\n\n'
-    "Try again."
-)
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_schema",
+            "description": (
+                "Get the enriched database schema with table structures, "
+                "column descriptions, primary keys, and foreign key relationships."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "db_id": {
+                        "type": "string",
+                        "description": "Database identifier",
+                    },
+                },
+                "required": ["db_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_sql",
+            "description": (
+                "Execute a SQL query against the database and return the results."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "SQL query to execute (SQLite syntax)",
+                    },
+                    "db_id": {
+                        "type": "string",
+                        "description": "Database identifier",
+                    },
+                },
+                "required": ["sql", "db_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish",
+            "description": "Submit the final answer to the question.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "description": (
+                            "The final answer. Use a number for numeric "
+                            'answers, "Yes"/"No" for boolean, a JSON array '
+                            "for lists, or a plain string for text."
+                        ),
+                    },
+                },
+                "required": ["answer"],
+            },
+        },
+    },
+]
 
 _indent = "    "
 
@@ -158,12 +143,11 @@ def _log_trace(msg: str) -> None:
 class ReActAgent(AgentABC):
     """ReAct (Reasoning + Acting) agent for text-to-SQL.
 
-    Uses an iterative Thought -> Action -> Observation loop with real tool
-    execution. The agent explores the schema via GetSchema, writes and
-    executes SQL via Execute, and terminates with Finish[answer].
-
-    LLM output is structured via response_format with a Pydantic model (ReActStep)
-    that enforces valid actions and required action_input fields at parse time.
+    Uses native LLM tool calling with an iterative loop. The agent explores
+    the schema via get_schema, writes and executes SQL via execute_sql, and
+    terminates via either:
+      - Path A: responding with structured JSON {"answer": ...} (no tool calls)
+      - Path B: calling the finish tool with {answer: ...}
     """
 
     def __init__(self, llm: LLMInterface, max_steps: int = MAX_ITERATIONS):
@@ -177,130 +161,51 @@ class ReActAgent(AgentABC):
     def name(self) -> str:
         return "react"
 
-    def run(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    def run(self, task: dict) -> dict:
         db_id = task["db_id"]
         question = task["question"]
         evidence = task.get("evidence", "")
 
-        system = SYSTEM_PROMPT + "\n" + FEW_SHOT_1 + "\n" + FEW_SHOT_2
-        user = self._build_user_prompt(question, evidence, db_id)
-
-        scratchpad = ""
+        messages = self._build_messages(db_id, question, evidence)
         full_trace_parts: list[str] = []
-        steps: list[Dict[str, Any]] = []
+        steps: list[dict] = []
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         start = time.perf_counter()
 
         iteration = 0
         while iteration < self.max_steps:
-            current_prompt = user + scratchpad
-
             try:
-                response = self.llm.generate(
-                    system, current_prompt,
+                response = self.llm.chat(
+                    messages=messages,
+                    tools=TOOLS,
                     max_completion_tokens=4096,
-                    response_format=ReActStep,
                 )
-                self._accumulate_usage(total_usage)
             except Exception as exc:
-                full_trace = (
-                    "\n".join(full_trace_parts) if full_trace_parts else scratchpad
-                )
                 latency_ms = (time.perf_counter() - start) * 1000
                 return {
                     "answer": "",
-                    "raw_output": full_trace,
+                    "raw_output": "\n".join(full_trace_parts),
                     "usage": total_usage,
                     "latency_ms": latency_ms,
                     "error": f"LLM generation failed: {exc}",
                     "steps": steps,
                 }
 
-            if not response or not response.strip():
-                full_trace = (
-                    "\n".join(full_trace_parts) if full_trace_parts else scratchpad
-                )
+            self._accumulate_usage(total_usage, response.usage)
+
+            if response.content:
+                full_trace_parts.append(f"[Assistant]: {response.content}")
+
+            if not response.tool_calls:
                 latency_ms = (time.perf_counter() - start) * 1000
-                return {
-                    "answer": "",
-                    "raw_output": full_trace,
-                    "usage": total_usage,
-                    "latency_ms": latency_ms,
-                    "error": "LLM returned empty responses after multiple retries",
-                    "steps": steps,
-                }
-
-            full_trace_parts.append(response)
-
-            step = self._parse_step(response)
-            retry_response = None
-
-            if step is None:
-                retry_response = self._retry_with_correction(
-                    system, current_prompt, response
-                )
-                if retry_response:
-                    self._accumulate_usage(total_usage)
-                    full_trace_parts.append(retry_response)
-                    step = self._parse_step(retry_response)
-
-            if step is None:
-                parse_detail = self._diagnose_parse_failure(response)
-                step_record = {
-                    "step_type": "parse_error",
-                    "thought": "",
-                    "action": None,
-                    "action_input": "",
-                    "observation": "Failed to parse LLM output as valid JSON.",
-                    "raw_response": response,
-                    "parse_detail": parse_detail,
-                }
-                if retry_response:
-                    step_record["retry_raw_response"] = retry_response
-                    step_record["retry_parse_detail"] = self._diagnose_parse_failure(
-                        retry_response
-                    )
-                if self.trace:
-                    _log_trace(f"--- Step {iteration + 1} (PARSE ERROR) ---")
-                    _log_trace(f"Raw: {response[:500]}...")
-                    _log_trace(f"Detail: {parse_detail}")
-                scratchpad += (
-                    "\nThought: (parse error)\n"
-                    "Action: None\n"
-                    "Action Input: \n"
-                    "Observation: Error: Could not parse response as JSON. "
-                    "Respond with a valid JSON object.\n"
-                )
-                full_trace_parts.append(CORRECTION_PROMPT)
-                steps.append(step_record)
-                if self.trace:
-                    sys.stdout.flush()
-                iteration += 1
-                continue
-
-            thought = step.thought
-            action = step.action
-            action_input_dict = step.action_input.model_dump(exclude_defaults=True)
-
-            if self.trace:
-                _log_trace(f"--- Step {iteration + 1} ---")
-                if thought:
-                    _log_trace(f"Thought: {thought}")
-
-            if action == "Finish":
-                raw_answer = step.action_input.answer
-                answer = raw_answer
-                if self.trace:
-                    _log_trace(f"Finish: {answer}")
+                answer = response.content or ""
                 steps.append({
-                    "step_type": "action",
-                    "thought": thought,
-                    "action": "Finish",
-                    "action_input": action_input_dict,
-                    "observation": None,
+                    "step_type": "text_response",
+                    "content": answer,
                 })
-                latency_ms = (time.perf_counter() - start) * 1000
+                if self.trace:
+                    _log_trace(f"Text response: {answer[:100]}")
                 return {
                     "answer": answer,
                     "raw_output": "\n".join(full_trace_parts),
@@ -310,39 +215,116 @@ class ReActAgent(AgentABC):
                     "steps": steps,
                 }
 
-            if self.trace:
-                _log_trace(f"Action: {action}")
-                display_input = str(action_input_dict)
-                if len(display_input) > 120:
-                    display_input = display_input[:120] + "..."
-                _log_trace(f"Action Input: {display_input}")
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": response.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        },
+                    }
+                    for tc in response.tool_calls
+                ],
+            }
+            messages.append(assistant_msg)
 
-            observation = self._execute_tool(action, action_input_dict, db_id)
-
-            scratchpad += (
-                f"\nThought: {thought}\n"
-                f"Action: {action}\n"
-                f"Action Input: {json.dumps(action_input_dict)}\n"
-                f"Observation: {observation}\n"
+            full_trace_parts.append(
+                "[Tool Calls]: "
+                + json.dumps([
+                    {"name": tc.name, "arguments": tc.arguments}
+                    for tc in response.tool_calls
+                ])
             )
-            full_trace_parts.append(f"Observation: {observation}")
 
-            if self.trace:
-                obs_display = observation
-                if len(obs_display) > 200:
-                    obs_display = obs_display[:200] + "..."
-                _log_trace(f"Observation: {obs_display}")
+            finished = False
+            final_answer = None
 
-            steps.append({
-                "step_type": "action",
-                "thought": thought,
-                "action": action,
-                "action_input": action_input_dict,
-                "observation": observation,
-            })
+            for tc in response.tool_calls:
+                if tc.name == "finish":
+                    try:
+                        args = json.loads(tc.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
+                    candidate = args.get("answer")
 
-            if self.trace:
-                sys.stdout.flush()
+                    if candidate is not None and candidate != "":
+                        final_answer = candidate
+                        finished = True
+                        steps.append({
+                            "step_type": "action",
+                            "thought": response.content,
+                            "action": "finish",
+                            "action_input": args,
+                            "observation": None,
+                        })
+                        if self.trace:
+                            _log_trace(f"Finish: {final_answer}")
+                        break
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": (
+                            "Error: finish() requires a non-empty 'answer' "
+                            "parameter. Please call finish again with your "
+                            "final answer value."
+                        ),
+                    })
+                    steps.append({
+                        "step_type": "action",
+                        "thought": response.content,
+                        "action": "finish",
+                        "action_input": args,
+                        "observation": "Error: missing answer parameter",
+                    })
+                    if self.trace:
+                        _log_trace("Finish called without answer — retrying")
+                    continue
+
+                observation = self._execute_tool(tc.name, tc.arguments, db_id)
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": observation,
+                })
+
+                full_trace_parts.append(f"[{tc.name} Result]: {observation}")
+
+                step_record: dict[str, Any] = {
+                    "step_type": "action",
+                    "thought": response.content,
+                    "action": tc.name,
+                    "action_input": tc.arguments,
+                    "observation": observation,
+                }
+                steps.append(step_record)
+
+                if self.trace:
+                    _log_trace(f"--- Step {iteration + 1} ---")
+                    if response.content:
+                        _log_trace(f"Thought: {response.content}")
+                    _log_trace(f"Action: {tc.name}")
+                    obs_display = observation
+                    if len(obs_display) > 200:
+                        obs_display = obs_display[:200] + "..."
+                    _log_trace(f"Observation: {obs_display}")
+                    sys.stdout.flush()
+
+            if finished:
+                latency_ms = (time.perf_counter() - start) * 1000
+                return {
+                    "answer": final_answer,
+                    "raw_output": "\n".join(full_trace_parts),
+                    "usage": total_usage,
+                    "latency_ms": latency_ms,
+                    "error": None,
+                    "steps": steps,
+                }
 
             iteration += 1
 
@@ -356,84 +338,30 @@ class ReActAgent(AgentABC):
             "steps": steps,
         }
 
-    def _build_user_prompt(self, question: str, evidence: str, db_id: str) -> str:
+    def _build_messages(self, db_id: str, question: str, evidence: str) -> list[dict]:
         parts = [f"Database ID: {db_id}", f"Question: {question}"]
         if evidence:
             parts.append(f"SQL Hint: {evidence}")
-        parts.append("\nStart by calling GetSchema to explore the database structure.")
-        return "\n".join(parts)
+        parts.append("\nStart by calling get_schema to explore the database structure.")
+        return [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "\n".join(parts)},
+        ]
 
-    def _parse_step(self, response: str) -> ReActStep | None:
+    def _execute_tool(self, name: str, arguments_json: str, db_id: str) -> str:
         try:
-            return ReActStep.model_validate_json(response)
-        except (ValidationError, json.JSONDecodeError):
-            pass
-
-        cleaned = re.sub(r"```(?:json)?\s*", "", response).strip()
-        try:
-            return ReActStep.model_validate_json(cleaned)
-        except (ValidationError, json.JSONDecodeError):
-            pass
-
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if match:
-            try:
-                return ReActStep.model_validate_json(match.group())
-            except (ValidationError, json.JSONDecodeError):
-                pass
-
-        return None
-
-    def _diagnose_parse_failure(self, response: str) -> Dict[str, Any]:
-        diagnosis: Dict[str, Any] = {
-            "response_length": len(response),
-            "has_markdown_fences": "```" in response,
-        }
-        cleaned = re.sub(r"```(?:json)?\s*", "", response).strip()
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if match:
-            candidate = match.group()
-            diagnosis["candidate_length"] = len(candidate)
-            try:
-                ReActStep.model_validate_json(candidate)
-            except ValidationError as e:
-                diagnosis["validation_errors"] = e.errors()
-            except json.JSONDecodeError as e:
-                diagnosis["json_error"] = str(e)
-        else:
-            diagnosis["no_json_object_found"] = True
-        return diagnosis
-
-    def _retry_with_correction(
-        self, system: str, current_prompt: str, original_response: str
-    ) -> str | None:
-        retry_prompt = (
-            current_prompt
-            + f"\n{original_response}\n\n"
-            + CORRECTION_PROMPT
-        )
-        try:
-            return self.llm.generate(
-                system, retry_prompt,
-                response_format=ReActStep,
-            )
-        except Exception:
-            return None
-
-    def _execute_tool(
-        self, action: str, action_input: Dict[str, Any], db_id: str
-    ) -> str:
-        params = dict(action_input)
+            params = json.loads(arguments_json)
+        except json.JSONDecodeError:
+            return "Error: Invalid JSON in tool arguments."
         params.setdefault("db_id", db_id)
 
-        if action == "GetSchema":
+        if name == "get_schema":
             return self._schema_tool.run(params)
-        if action == "Execute":
+        if name == "execute_sql":
             return self._sql_tool.run(params)
-        return f"Error: Unknown action '{action}'"
+        return f"Error: Unknown tool '{name}'"
 
-    def _accumulate_usage(self, total: Dict[str, int]) -> None:
-        usage = self.llm.get_usage()
+    def _accumulate_usage(self, total: dict, usage: dict) -> None:
         total["prompt_tokens"] += usage.get("prompt_tokens", 0)
         total["completion_tokens"] += usage.get("completion_tokens", 0)
         total["total_tokens"] += usage.get("total_tokens", 0)

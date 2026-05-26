@@ -6,7 +6,7 @@ import litellm
 import yaml
 from pydantic import BaseModel
 
-from .provider import LLMInterface
+from .provider import ChatResponse, LLMInterface, ToolCall
 
 litellm.enable_json_schema_validation = True
 # litellm._turn_on_debug()
@@ -108,6 +108,63 @@ class LiteLLMClient(LLMInterface):
         }
 
         return content
+
+    def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+        max_completion_tokens: int | None = None,
+        response_format: Type[BaseModel] | None = None,
+    ) -> ChatResponse:
+        max_completion_tokens = (
+            max_completion_tokens if max_completion_tokens is not None
+            else self.default_max_completion_tokens
+        )
+
+        kwargs = dict(
+            model=self.model,
+            messages=messages,
+            max_completion_tokens=max_completion_tokens,
+            num_retries=self.num_retries,
+            api_key=self.api_key,
+            api_base=self.api_base,
+        )
+        if tools is not None:
+            kwargs["tools"] = tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+
+        res = litellm.completion(**kwargs)
+        choice = res.choices[0]
+        msg = choice.message
+
+        tool_calls = None
+        if msg.tool_calls:
+            tool_calls = [
+                ToolCall(
+                    id=tc.id,
+                    name=tc.function.name,
+                    arguments=tc.function.arguments,
+                )
+                for tc in msg.tool_calls
+            ]
+
+        usage = {
+            "prompt_tokens": res.usage.prompt_tokens,
+            "completion_tokens": res.usage.completion_tokens,
+            "total_tokens": res.usage.total_tokens,
+        }
+        self._last_usage = usage
+
+        return ChatResponse(
+            content=msg.content,
+            tool_calls=tool_calls,
+            usage=usage,
+            finish_reason=choice.finish_reason or "stop",
+        )
 
     def get_usage(self) -> dict:
         return self._last_usage.copy()

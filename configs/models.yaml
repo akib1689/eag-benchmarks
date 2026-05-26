@@ -14,8 +14,14 @@ groq:
   temperature: 0.0
   max_completion_tokens: 1024
 
-glm:
-  model: glm-5.1
+groq-verdict:
+  model: groq/openai/gpt-oss-20b
   api_key_env: LITELLM_API_KEY
   temperature: 0.0
   max_completion_tokens: 512
+
+openrouter:
+  model: openrouter/openai/gpt-oss-120b:free
+  api_key_env: LITELLM_API_KEY
+  temperature: 0.0
+  max_completion_tokens: 1024
