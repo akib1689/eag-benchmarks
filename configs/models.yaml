@@ -1,13 +1,27 @@
-primary:
-  provider: groq
-  model: gpt-oss-120b
-  base_url: https://api.groq.com/openai/v1
-  temperature: 0.1
-  max_tokens: 1024
+# Model configurations for the LiteLLM proxy.
+#
+# Each key becomes a CLI --model choice in benchmarks/run.py.
+# The ``model`` field is the name registered on your litellm proxy
+# (set in the proxy's config.yaml).  The proxy handles provider
+# routing, key rotation, and rate-limit retries.
+#
+# ``api_key_env`` tells the client which env var holds the virtual key.
+# ``base_url`` defaults to LITELLM_BASE_URL env var, then http://localhost:4000.
 
-fallback:
-  provider: glm
-  model: glm-5.1
-  base_url: https://open.bigmodel.cn/api/paas/v4
-  temperature: 0.1
-  max_tokens: 1024
+groq:
+  model: groq/openai/gpt-oss-120b
+  api_key_env: LITELLM_API_KEY
+  temperature: 0.0
+  max_completion_tokens: 1024
+
+groq-verdict:
+  model: groq/openai/gpt-oss-20b
+  api_key_env: LITELLM_API_KEY
+  temperature: 0.0
+  max_completion_tokens: 512
+
+openrouter:
+  model: openrouter/openai/gpt-oss-120b:free
+  api_key_env: LITELLM_API_KEY
+  temperature: 0.0
+  max_completion_tokens: 1024

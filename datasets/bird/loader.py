@@ -11,10 +11,19 @@ def load_mini_dev(limit: Optional[int] = None) -> List[Dict]:
 
     Each item is a dict with keys: question_id, db_id, question, evidence, SQL, difficulty.
     """
-    json_path = BIRD_ROOT / "mini_dev_sqlite.json"
-    if not json_path.exists():
+    candidates = [
+        BIRD_ROOT / "minidev" / "MINIDEV" / "mini_dev_sqlite.json",
+        BIRD_ROOT / "mini_dev_sqlite.json",
+    ]
+    json_path = None
+    for path in candidates:
+        if path.exists():
+            json_path = path
+            break
+
+    if json_path is None:
         raise FileNotFoundError(
-            f"BIRD Mini-Dev data not found at {json_path}. "
+            f"BIRD Mini-Dev data not found. Searched: {[str(p) for p in candidates]}. "
             "Run: bash scripts/download_bird.sh"
         )
 

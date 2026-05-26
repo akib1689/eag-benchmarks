@@ -13,11 +13,18 @@ class BenchmarkMetrics:
     completion_tokens: int = 0
     total_tokens: int = 0
     errors: int = 0
+    not_processed: int = 0
     per_item: list = field(default_factory=list)
-    match_tiers: dict = field(
-        default_factory=lambda: {"exact": 0, "set": 0, "fuzzy": 0, "none": 0}
+    verdicts: dict = field(
+        default_factory=lambda: {
+            "match": 0,
+            "wrong_answer": 0,
+            "mismatch": 0,
+            "parse_error": 0,
+            "unclear": 0,
+            "not_processed": 0,
+        }
     )
-    parse_failures: int = 0
     _confidences: list = field(default_factory=list)
 
     @property
@@ -34,13 +41,10 @@ class BenchmarkMetrics:
             return 0.0
         return sum(self._confidences) / len(self._confidences)
 
-    def record_match(self, tier: str, confidence: float, parse_success: bool):
-        """Record a single comparison result."""
-        if tier in self.match_tiers:
-            self.match_tiers[tier] += 1
+    def record_verdict(self, verdict: str, confidence: float):
+        if verdict in self.verdicts:
+            self.verdicts[verdict] += 1
         self._confidences.append(confidence)
-        if not parse_success:
-            self.parse_failures += 1
 
     def summary(self) -> dict:
         return {
@@ -48,12 +52,12 @@ class BenchmarkMetrics:
             "correct": self.correct,
             "total": self.total,
             "errors": self.errors,
+            "not_processed": self.not_processed,
             "avg_latency_ms": round(self.avg_latency_ms, 2),
             "total_prompt_tokens": self.prompt_tokens,
             "total_completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
-            "match_tiers": dict(self.match_tiers),
-            "parse_failures": self.parse_failures,
+            "verdicts": dict(self.verdicts),
             "avg_confidence": round(self.avg_confidence, 4),
         }
 

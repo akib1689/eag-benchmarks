@@ -2,6 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
+.vscode/
 
 # C extensions
 *.so
@@ -163,6 +164,7 @@ data/
 # Run artifacts
 results/*.json
 results/*.csv
+!results/bird_react_openrouter_20260526_163502.json
 
 # Spyder project settings
 .spyderproject
@@ -223,3 +225,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.DS_Store
+opencode.json

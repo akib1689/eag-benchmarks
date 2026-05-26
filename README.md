@@ -16,19 +16,19 @@ This harness compares EAG against baseline paradigms on the text-to-SQL task:
 
 | Paradigm | How it works | Status |
 | -------- | ------------ | ------ |
-| **ReAct** | Interleaved reasoning + tool execution → answer | Working (Phase 1) |
+| **ReAct** | Interleaved reasoning + tool execution → answer | Working |
 | **PAL** | Program-Aided Language — Python constructs SQL → answer | Transitional |
 | **PoT** | Program-of-Thoughts — declarative reasoning → answer | Transitional |
 | **EAG** | Schema-only plan generation + local execution → answer | Stub |
 
-**Evaluation compares answers, not SQL.** Each agent produces an answer to the natural language question. The evaluator compares it against the gold answer (computed by executing the gold SQL internally) using tiered matching: exact → set equivalence → fuzzy numeric.
+**Evaluation compares answers, not SQL.** Each agent produces an answer to the natural language question. The evaluator compares it against the gold answer (computed by executing the gold SQL internally) using an LLM-based verdict checker.
 
 ## Quick Start
 
 ### Prerequisites
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) installed
-- A [Groq](https://console.groq.com/) API key
+- A [LiteLLM proxy](https://docs.litellm.ai/docs/proxy) running with your model keys configured
 
 ### Setup
 
@@ -41,7 +41,7 @@ bash scripts/download_bird.sh
 
 # 3. Configure API keys
 cp .env.example .env
-# Edit .env and add your GROQ_API_KEY
+# Edit .env and add your LITELLM_API_KEY
 ```
 
 ### Run a Benchmark
@@ -51,7 +51,13 @@ cp .env.example .env
 uv run python -m benchmarks.run --agent react --samples 10
 
 # With a different model
-uv run python -m benchmarks.run --agent react --model glm --samples 5
+uv run python -m benchmarks.run --agent react --model openrouter --samples 5
+
+# With live step-by-step tracing
+uv run python -m benchmarks.run --agent react --samples 10 --trace
+
+# Skip LLM verdict checker (faster, only checks non-empty answers)
+uv run python -m benchmarks.run --agent react --samples 10 --no-verdict
 ```
 
 **CLI Options:**
@@ -59,9 +65,12 @@ uv run python -m benchmarks.run --agent react --model glm --samples 5
 | Flag | Choices | Default | Description |
 | ---- | ------- | ------- | ----------- |
 | `--agent` | `react`, `pal`, `pot`, `eag` | `react` | Agent paradigm to evaluate |
-| `--model` | `groq`, `glm` | `groq` | LLM provider |
+| `--model` | `groq`, `openrouter` | `groq` | LLM provider |
 | `--dataset` | `bird` | `bird` | Dataset to evaluate on |
 | `--samples` | Any integer | `10` | Number of samples from dev set |
+| `--trace` | — | off | Print live step-by-step agent execution |
+| `--delay` | Any float | `2.0` | Seconds to wait between questions |
+| `--no-verdict` | — | off | Disable LLM verdict checker |
 
 Results are saved to `results/` as timestamped JSON files.
 
@@ -70,28 +79,27 @@ Results are saved to `results/` as timestamped JSON files.
 ```
 eag-benchmarks/
 ├── agents/           # Agent implementations (each conforms to AgentABC)
-│   ├── base.py       # Abstract base class — run(task) → {answer, raw_output, usage, latency_ms, error}
-│   ├── react.py      # ReAct agent (reasoning + tool execution)
+│   ├── base.py       # Abstract base class — run(task) → {answer, raw_output, usage, latency_ms, error, steps}
+│   ├── react.py      # ReAct agent (native LLM tool calling, iterative loop)
 │   ├── pal.py        # PAL agent (transitional)
 │   ├── pot.py        # PoT agent (transitional)
 │   └── eag.py        # EAG stub (NotImplementedError)
 ├── tools/            # Agent tools for environment interaction
 │   ├── __init__.py   # ToolABC base class, @register_tool decorator, registry
-│   └── execute_sql.py # ExecuteSQLTool — sandboxed SQLite execution
+│   ├── execute_sql.py # ExecuteSQLTool — sandboxed SQLite execution
+│   └── get_schema.py # GetSchemaTool — enriched schema with descriptions, PKs, FKs, row counts
 ├── eval/             # Answer-based evaluation pipeline
 │   ├── gold.py       # Gold answer generation (executes gold SQL → normalized result)
-│   ├── answer_extractor.py # Parse agent output → structured answer
-│   ├── comparators.py # Three-tier matching: exact → set → fuzzy
+│   ├── verdict.py    # VerdictChecker — LLM-based semantic comparison (match/wrong/mismatch/etc.)
 │   ├── normalizer.py # Type coercion, NULL handling, shape detection
-│   ├── metrics.py    # BenchmarkMetrics (match_tiers, parse_failures, avg_confidence)
+│   ├── metrics.py    # BenchmarkMetrics (verdicts, parse_failures, avg_confidence)
 │   └── executor.py   # Low-level SQL execution utility
 ├── datasets/
 │   └── bird/
 │       └── loader.py # BIRD Mini-Dev loader — schema-only, no raw data exposure
 ├── llm/
-│   ├── provider.py   # LLMInterface (abstract) — swap providers with zero code changes
-│   ├── groq.py       # GroqClient (gpt-oss-120b)
-│   └── glm.py        # GLMClient (glm-5.1)
+│   ├── provider.py      # LLMInterface (abstract) — generate(), chat(), get_usage()
+│   └── litellm_client.py # LiteLLMClient — unified adapter via LiteLLM proxy
 ├── benchmarks/
 │   └── run.py        # CLI entry point
 ├── configs/          # Model and dataset YAML configs
@@ -103,15 +111,15 @@ eag-benchmarks/
 ### Evaluation Flow
 
 ```
-Agent output → extract_answer() → canonical form ─┐
-                                                    ├→ compare_answers() → (correct, confidence, tier)
-Gold SQL → execute → normalize_result() ───────────┘
+Agent output (answer field) ─────────────────────────┐
+                                                      ├→ VerdictChecker.check() → VerdictResult
+Gold SQL → execute → normalize_result() → gold answer─┘
 ```
 
 ### Adding a New Agent
 
 1. Create `agents/your_agent.py` inheriting from `AgentABC`
-2. Implement `run(task)` returning `{answer, raw_output, usage, latency_ms, error}`
+2. Implement `run(task)` returning `{answer, raw_output, usage, latency_ms, error, steps}`
 3. Register it in `benchmarks/run.py` under `AGENTS`
 
 ### Adding a New Tool
@@ -122,9 +130,8 @@ Gold SQL → execute → normalize_result() ───────────┘
 
 ### Adding a New LLM Provider
 
-1. Create `llm/your_provider.py` inheriting from `LLMInterface`
-2. Implement `generate()` and `get_usage()`
-3. Register it in `benchmarks/run.py` under `MODELS`
+1. Add an entry to `configs/models.yaml` with the model alias registered on your LiteLLM proxy
+2. Add a lambda in `benchmarks/run.py` under `MODELS` mapping to `LiteLLMClient(config_name="...")`
 
 ## BIRD Mini-Dev
 
