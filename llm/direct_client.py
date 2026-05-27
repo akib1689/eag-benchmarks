@@ -9,63 +9,55 @@ from pydantic import BaseModel
 from .provider import ChatResponse, LLMInterface, ToolCall
 
 litellm.enable_json_schema_validation = True
-# litellm._turn_on_debug()
 
 CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
 
 
-def load_model_config(name: str) -> dict:
-    """Load a named model config from configs/models.yaml.
-
-    Each entry must include at least ``model`` and may include
-    ``api_key_env``, ``base_url``, ``temperature``, ``max_tokens``.
-    """
+def _load_direct_config(name: str) -> dict:
     path = CONFIGS_DIR / "models.yaml"
     with open(path) as f:
         configs = yaml.safe_load(f)
-    if name not in configs:
+    direct = configs.get("direct")
+    if not direct or name not in direct:
+        available = list(direct.keys()) if direct else []
         raise ValueError(
-            f"Model config '{name}' not found in {path}. "
-            f"Available: {', '.join(configs.keys())}"
+            f"Direct model config '{name}' not found under 'direct' in {path}. "
+            f"Available: {', '.join(available)}"
         )
-    return configs[name]
+    return direct[name]
 
 
-class LiteLLMClient(LLMInterface):
-    """Unified LLM adapter that talks to a LiteLLM proxy via the litellm SDK.
+class DirectLLMClient(LLMInterface):
+    """LLM adapter that calls providers directly via the litellm SDK (no proxy).
 
-    Configuration is loaded from ``configs/models.yaml`` by name.  The
-    proxy handles provider routing, key rotation across multiple Groq
-    accounts, and rate-limit retries.
+    Configuration is loaded from the ``direct`` section of
+    ``configs/models.yaml`` by name.  The model name must include the
+    litellm provider prefix (e.g., ``groq/...``, ``openrouter/...``) so
+    litellm can resolve the correct endpoint automatically.
 
-    The model name is prefixed with ``litellm_proxy/`` so the SDK routes
-    the request through the proxy instead of calling providers directly.
-
-    Required YAML keys per model entry:
-        model: str           — model alias as registered on the proxy
+    Required YAML keys per direct entry:
+        model: str           — full litellm model name with provider prefix
 
     Optional YAML keys:
-        base_url: str        — proxy endpoint (env: LITELLM_BASE_URL, default: http://localhost:4000)
-        api_key_env: str     — env var holding the virtual key (default: LITELLM_API_KEY)
+        api_key_env: str     — env var holding the provider API key (default: GROQ_API_KEY)
         temperature: float   — default sampling temperature (default: 0.0)
-        max_tokens: int      — default max completion tokens (default: 1024)
+        max_completion_tokens: int — default max completion tokens (default: 4096)
         num_retries: int     — retry count for transient / 429 errors (default: 8)
     """
 
     def __init__(self, config_name: str):
-        cfg = load_model_config(config_name)
+        cfg = _load_direct_config(config_name)
 
-        api_key_env = cfg.get("api_key_env", "LITELLM_API_KEY")
+        api_key_env = cfg.get("api_key_env", "GROQ_API_KEY")
         api_key = os.getenv(api_key_env)
         if not api_key:
             raise ValueError(
                 f"{api_key_env} environment variable is not set "
-                f"(required by model config '{config_name}')"
+                f"(required by direct model config '{config_name}')"
             )
 
         self.api_key = api_key
-        self.api_base = cfg.get("base_url", os.getenv("LITELLM_BASE_URL", "http://localhost:4000"))
-        self.model = f"litellm_proxy/{cfg['model']}"
+        self.model = cfg["model"]
         self.default_temperature = cfg.get("temperature", 0.0)
         self.default_max_completion_tokens = cfg.get("max_completion_tokens", 4096)
         self.num_retries = cfg.get("num_retries", 8)
@@ -92,7 +84,6 @@ class LiteLLMClient(LLMInterface):
             max_completion_tokens=max_completion_tokens,
             num_retries=self.num_retries,
             api_key=self.api_key,
-            api_base=self.api_base,
         )
         if response_format is not None:
             kwargs["response_format"] = response_format
@@ -134,7 +125,6 @@ class LiteLLMClient(LLMInterface):
             max_completion_tokens=max_completion_tokens,
             num_retries=self.num_retries,
             api_key=self.api_key,
-            api_base=self.api_base,
         )
         if tools is not None:
             kwargs["tools"] = tools

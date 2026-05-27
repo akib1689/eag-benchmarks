@@ -18,6 +18,7 @@ class ChatResponse:
     tool_calls: list[ToolCall] | None
     usage: dict
     finish_reason: str
+    reasoning_content: str | None = None
 
 
 class LLMInterface(ABC):
