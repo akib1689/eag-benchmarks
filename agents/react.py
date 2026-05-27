@@ -161,6 +161,8 @@ class ReActAgent(AgentABC):
     def name(self) -> str:
         return "react"
 
+    MAX_EMPTY_RETRIES = 2
+
     def run(self, task: dict) -> dict:
         db_id = task["db_id"]
         question = task["question"]
@@ -174,6 +176,7 @@ class ReActAgent(AgentABC):
         start = time.perf_counter()
 
         iteration = 0
+        empty_retries = 0
         while iteration < self.max_steps:
             try:
                 response = self.llm.chat(
@@ -198,8 +201,24 @@ class ReActAgent(AgentABC):
                 full_trace_parts.append(f"[Assistant]: {response.content}")
 
             if not response.tool_calls:
-                latency_ms = (time.perf_counter() - start) * 1000
                 answer = response.content or ""
+                if not answer.strip() and empty_retries < self.MAX_EMPTY_RETRIES:
+                    empty_retries += 1
+                    messages.append({"role": "assistant", "content": None})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous response was empty. "
+                            "Please provide the answer now using the finish tool "
+                            "or respond with the final value."
+                        ),
+                    })
+                    if self.trace:
+                        _log_trace("Empty response — retrying")
+                    iteration += 1
+                    continue
+
+                latency_ms = (time.perf_counter() - start) * 1000
                 steps.append({
                     "step_type": "text_response",
                     "content": answer,
@@ -211,7 +230,7 @@ class ReActAgent(AgentABC):
                     "raw_output": "\n".join(full_trace_parts),
                     "usage": total_usage,
                     "latency_ms": latency_ms,
-                    "error": None,
+                    "error": None if answer.strip() else "Empty response after retries",
                     "steps": steps,
                 }
 
@@ -256,7 +275,7 @@ class ReActAgent(AgentABC):
                         finished = True
                         steps.append({
                             "step_type": "action",
-                            "thought": response.content,
+                            "thought": response.reasoning_content,
                             "action": "finish",
                             "action_input": args,
                             "observation": None,
@@ -276,7 +295,7 @@ class ReActAgent(AgentABC):
                     })
                     steps.append({
                         "step_type": "action",
-                        "thought": response.content,
+                        "thought": response.reasoning_content,
                         "action": "finish",
                         "action_input": args,
                         "observation": "Error: missing answer parameter",
@@ -297,7 +316,7 @@ class ReActAgent(AgentABC):
 
                 step_record: dict[str, Any] = {
                     "step_type": "action",
-                    "thought": response.content,
+                    "thought": response.reasoning_content,
                     "action": tc.name,
                     "action_input": tc.arguments,
                     "observation": observation,
@@ -306,8 +325,8 @@ class ReActAgent(AgentABC):
 
                 if self.trace:
                     _log_trace(f"--- Step {iteration + 1} ---")
-                    if response.content:
-                        _log_trace(f"Thought: {response.content}")
+                    if response.reasoning_content:
+                        _log_trace(f"Thought: {response.reasoning_content}")
                     _log_trace(f"Action: {tc.name}")
                     obs_display = observation
                     if len(obs_display) > 200:

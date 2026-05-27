@@ -18,10 +18,38 @@ groq-verdict:
   model: groq/openai/gpt-oss-20b
   api_key_env: LITELLM_API_KEY
   temperature: 0.0
-  max_completion_tokens: 512
+  max_completion_tokens: 1024
 
 openrouter:
   model: openrouter/openai/gpt-oss-120b:free
   api_key_env: LITELLM_API_KEY
   temperature: 0.0
   max_completion_tokens: 1024
+
+# Direct-call configurations (bypasses LiteLLM proxy).
+#
+# Each key under ``direct`` mirrors the top-level proxy configs.
+# The ``model`` field is the full litellm model name including provider
+# prefix (e.g., ``groq/...``, ``openrouter/...``).  litellm resolves the
+# provider endpoint automatically from this prefix — no api_base needed.
+#
+# ``api_key_env`` points to the provider-specific API key env var.
+
+direct:
+  groq:
+    model: groq/openai/gpt-oss-120b
+    api_key_env: GROQ_API_KEY
+    temperature: 0.0
+    max_completion_tokens: 1024
+
+  groq-verdict:
+    model: groq/openai/gpt-oss-20b
+    api_key_env: GROQ_API_KEY
+    temperature: 0.0
+    max_completion_tokens: 512
+
+  openrouter:
+    model: openrouter/openai/gpt-oss-120b:free
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.0
+    max_completion_tokens: 1024
