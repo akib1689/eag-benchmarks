@@ -165,6 +165,8 @@ data/
 results/*.json
 results/*.csv
 !results/bird_react_openrouter_20260526_163502.json
+!results/bird_react_openrouter_20260527_164546.json
+!results/bird_react_openrouter_20260529_192150.json
 
 # Spyder project settings
 .spyderproject

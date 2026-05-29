@@ -153,6 +153,8 @@ def parse_agent_answer(raw: str) -> Union[str, int, float, list]:
 def _coerce_scalar(text: str) -> Union[str, int, float]:
     """Coerce a string to int, float, or keep as string."""
     text = text.strip()
+    if text.endswith('%'):
+        text = text[:-1].strip()
     try:
         int_val = int(text)
         return int_val
@@ -220,6 +222,8 @@ def _normalize_scalar(val: Any) -> Any:
         return round(val, 10)
     if isinstance(val, str):
         val = val.strip()
+        if val.endswith('%'):
+            val = val[:-1].strip()
         if val.lower() in ("null", "none", "n/a", "nan", ""):
             return None
         if val.lower() in ("true", "yes"):

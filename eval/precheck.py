@@ -48,6 +48,21 @@ def precheck_match(agent_answer: Any, gold_answer: Any) -> PrecheckResult:
     if gold_shape in ("list", "column") and agent_shape in ("list", "column", "scalar"):
         return _compare_lists(agent_norm, agent_shape, gold_norm, gold_shape)
 
+    if gold_shape == "table" and agent_shape == "list":
+        if isinstance(agent_answer, str) and ';' in agent_answer:
+            return PrecheckResult("undecided", 0.5,
+                                  "agent has semicolons suggesting structured text, "
+                                  "gold is table, defer to LLM")
+        a_rows = _ensure_table(agent_norm)
+        g_rows = _ensure_table(gold_norm)
+        overlap = _row_overlap(a_rows, g_rows)
+        if overlap >= 0.5:
+            return PrecheckResult("undecided", 0.5,
+                                  f"agent list vs gold table with {overlap:.0%} "
+                                  "row overlap, defer to LLM")
+        return PrecheckResult("wrong_answer", 0.9,
+                              "agent list vs gold table, low overlap")
+
     if gold_shape == "table" and agent_shape in ("table", "list"):
         return _compare_tables(agent_norm, agent_shape, gold_norm, gold_shape)
 
@@ -183,6 +198,16 @@ def _compare_scalars(agent: Any, gold: Any) -> PrecheckResult:
         if _is_affirmative_pair(agent, gold):
             return PrecheckResult("undecided", 0.5,
                                   f"affirmative pair: '{agent}' vs '{gold}', "
+                                  "defer to LLM")
+        a_low = agent.lower().strip()
+        g_low = gold.lower().strip()
+        if len(g_low) >= 4 and g_low in a_low:
+            return PrecheckResult("undecided", 0.5,
+                                  f"gold '{g_low}' is substring of agent '{a_low}', "
+                                  "defer to LLM")
+        if len(a_low) >= 4 and a_low in g_low:
+            return PrecheckResult("undecided", 0.5,
+                                  f"agent '{a_low}' is substring of gold '{g_low}', "
                                   "defer to LLM")
         return PrecheckResult("wrong_answer", 0.95,
                               f"string mismatch: '{agent}' vs '{gold}'")
